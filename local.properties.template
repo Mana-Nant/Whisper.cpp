@@ -1,0 +1,7 @@
+# Android SDK パス (環境に合わせて変更)
+sdk.dir=/Users/USERNAME/Library/Android/sdk
+# sdk.dir=/home/USERNAME/Android/Sdk  # Linux
+# sdk.dir=C\:\\Users\\USERNAME\\AppData\\Local\\Android\\Sdk  # Windows
+
+# NDK パス (オプション)
+# ndk.dir=${sdk.dir}/ndk/25.2.9519653

@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Whisper 文字起こし</string>
+    <string name="action_info">情報</string>
+</resources>
