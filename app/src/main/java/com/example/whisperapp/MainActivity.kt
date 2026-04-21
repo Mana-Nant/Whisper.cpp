@@ -212,8 +212,8 @@ class MainActivity : AppCompatActivity() {
             is TranscriptionViewModel.UiState.Error -> {
                 binding.tvStatus.text = "エラーが発生しました"
                 binding.progressBar.visibility = View.GONE
-                binding.btnRecord.isEnabled = ctxPtr != 0L
-                binding.btnPickFile.isEnabled = ctxPtr != 0L
+                binding.btnRecord.isEnabled = ctxPtr != isModelReady
+                binding.btnPickFile.isEnabled = ctxPtr != isModelReady
 
                 AlertDialog.Builder(this)
                     .setTitle("エラー")
@@ -225,7 +225,9 @@ class MainActivity : AppCompatActivity() {
     }
 
     // ダミー: ViewModel から ctxPtr を参照するためのプロパティ (便宜上)
-    private val ctxPtr: Boolean get() = viewModel.uiState.value != TranscriptionViewModel.UiState.Idle
+    private val isModelReady: Boolean
+        get() = viewModel.uiState.value != TranscriptionViewModel.UiState.Idle
+            && viewModel.uiState.value != TranscriptionViewModel.UiState.LoadingModel
 
     override fun onCreateOptionsMenu(menu: Menu): Boolean {
         menuInflater.inflate(R.menu.menu_main, menu)
