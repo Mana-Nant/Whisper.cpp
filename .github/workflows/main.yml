@@ -20,9 +20,12 @@ jobs:
     - name: Install NDK and CMake
       run: sdkmanager "ndk;25.2.9519653" "cmake;3.22.1"
 
-    - name: Generate Gradle wrapper
+    - name: Install Gradle and create wrapper
       run: |
-        gradle wrapper --gradle-version 8.4
+        wget -q https://services.gradle.org/distributions/gradle-8.4-bin.zip
+        unzip -q gradle-8.4-bin.zip
+        export PATH=$PWD/gradle-8.4/bin:$PATH
+        gradle wrapper
         chmod +x gradlew
 
     - name: Clone whisper.cpp
@@ -31,7 +34,9 @@ jobs:
         git clone --depth=1 https://github.com/ggerganov/whisper.cpp
 
     - name: Build APK
-      run: ./gradlew assembleDebug --no-daemon
+      run: |
+        export ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/25.2.9519653
+        ./gradlew assembleDebug --no-daemon --stacktrace
 
     - name: Upload APK
       uses: actions/upload-artifact@v4
