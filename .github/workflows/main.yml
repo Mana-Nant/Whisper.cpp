@@ -28,10 +28,12 @@ jobs:
         gradle wrapper
         chmod +x gradlew
 
-    - name: Clone whisper.cpp
+- name: Clone whisper.cpp
       run: |
+        mkdir -p app/src/main/cpp
         cd app/src/main/cpp
         git clone --depth=1 https://github.com/ggerganov/whisper.cpp
+        ls whisper.cpp/include/
 
     - name: Build APK
       run: |
