@@ -88,7 +88,7 @@ Java_com_example_whisperapp_WhisperLib_free(
 // ============================================================
 // 新しいセグメントのコールバック
 // ============================================================
-static void whisper_new_segment_callback(
+static void on_new_segment(
         struct whisper_context* ctx,
         struct whisper_state* /*state*/,
         int n_new,
@@ -171,7 +171,7 @@ Java_com_example_whisperapp_WhisperLib_transcribe(
 
     // セグメントコールバック
     if (callback != nullptr) {
-        params.new_segment_callback = whisper_new_segment_callback;
+        params.new_segment_callback = on_new_segment;
         params.new_segment_callback_user_data = nullptr;
     }
 
