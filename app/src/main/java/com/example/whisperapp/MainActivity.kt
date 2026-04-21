@@ -212,8 +212,8 @@ class MainActivity : AppCompatActivity() {
             is TranscriptionViewModel.UiState.Error -> {
                 binding.tvStatus.text = "エラーが発生しました"
                 binding.progressBar.visibility = View.GONE
-                binding.btnRecord.isEnabled = ctxPtr != isModelReady
-                binding.btnPickFile.isEnabled = ctxPtr != isModelReady
+                binding.btnRecord.isEnabled = isModelReady
+                binding.btnPickFile.isEnabled = isModelReady
 
                 AlertDialog.Builder(this)
                     .setTitle("エラー")
