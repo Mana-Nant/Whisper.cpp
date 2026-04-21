@@ -7,41 +7,39 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-    - uses: actions/setup-java@v4
-      with:
-        java-version: '17'
-        distribution: 'temurin'
+      - uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
 
-    - name: Setup Android SDK
-      uses: android-actions/setup-android@v3
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
 
-    - name: Install NDK and CMake
-      run: sdkmanager "ndk;25.2.9519653" "cmake;3.22.1"
+      - name: Install NDK and CMake
+        run: sdkmanager "ndk;25.2.9519653" "cmake;3.22.1"
 
-    - name: Install Gradle and create wrapper
-      run: |
-        wget -q https://services.gradle.org/distributions/gradle-8.4-bin.zip
-        unzip -q gradle-8.4-bin.zip
-        export PATH=$PWD/gradle-8.4/bin:$PATH
-        gradle wrapper
-        chmod +x gradlew
+      - name: Install Gradle
+        run: |
+          wget -q https://services.gradle.org/distributions/gradle-8.4-bin.zip
+          unzip -q gradle-8.4-bin.zip -d /tmp/gradle
+          /tmp/gradle/gradle-8.4/bin/gradle wrapper --project-dir .
+          chmod +x gradlew
 
-- name: Clone whisper.cpp
-      run: |
-        mkdir -p app/src/main/cpp
-        cd app/src/main/cpp
-        git clone --depth=1 https://github.com/ggerganov/whisper.cpp
-        ls whisper.cpp/include/
+      - name: Clone whisper.cpp
+        run: |
+          mkdir -p app/src/main/cpp
+          cd app/src/main/cpp
+          git clone --depth=1 https://github.com/ggerganov/whisper.cpp
+          ls whisper.cpp/include/
 
-    - name: Build APK
-      run: |
-        export ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/25.2.9519653
-        ./gradlew assembleDebug --no-daemon --stacktrace
+      - name: Build APK
+        run: |
+          export ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/25.2.9519653
+          ./gradlew assembleDebug --no-daemon
 
-    - name: Upload APK
-      uses: actions/upload-artifact@v4
-      with:
-        name: WhisperApp-debug
-        path: app/build/outputs/apk/debug/app-debug.apk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: WhisperApp-debug
+          path: app/build/outputs/apk/debug/app-debug.apk
