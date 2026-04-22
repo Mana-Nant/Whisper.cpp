@@ -15,9 +15,6 @@ import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FileOutputStream
 
-/**
- * アプリの状態を管理する ViewModel
- */
 class TranscriptionViewModel(application: Application) : AndroidViewModel(application) {
 
     companion object {
@@ -27,7 +24,6 @@ class TranscriptionViewModel(application: Application) : AndroidViewModel(applic
         private const val PREF_LANGUAGE = "language"
     }
 
-    // UI 状態
     sealed class UiState {
         object Idle : UiState()
         object LoadingModel : UiState()
@@ -55,130 +51,112 @@ class TranscriptionViewModel(application: Application) : AndroidViewModel(applic
     private val _translateToEnglish = MutableLiveData(false)
     val translateToEnglish: LiveData<Boolean> = _translateToEnglish
 
-    // 内部状態
     private val whisperLib = WhisperLib()
     private val audioRecorder = AudioRecorder()
-    private var ctxPtr: Long = 0L
+    var ctxPtr: Long = 0L
+        private set
     private var transcribeJob: Job? = null
     private var durationTimerJob: Job? = null
 
     private val prefs = application.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
 
     init {
-        // 保存済み設定を復元
         _selectedLanguage.value = prefs.getString(PREF_LANGUAGE, "ja") ?: "ja"
-
-        // 保存済みモデルパスがあれば自動読み込み
         val savedModelPath = prefs.getString(PREF_MODEL_PATH, null)
         if (savedModelPath != null && File(savedModelPath).exists()) {
             loadModel(savedModelPath)
         }
     }
 
-    /**
-     * モデルを読み込む
-     */
- fun loadModel(modelPath: String) {
-    viewModelScope.launch {
-        _uiState.value = UiState.LoadingModel
-        _modelInfo.value = "モデル読み込み中..."
+    fun loadModel(modelPath: String) {
+        viewModelScope.launch {
+            _uiState.value = UiState.LoadingModel
+            _modelInfo.value = "モデル読み込み中..."
 
-        // 録音中なら停止
-        audioRecorder.cancelRecording()
-        transcribeJob?.cancel()
+            audioRecorder.cancelRecording()
+            transcribeJob?.cancel()
 
-        withContext(Dispatchers.IO) {
-            // 既存コンテキストを先に解放
-            val oldPtr = ctxPtr
-            ctxPtr = 0L
-            if (oldPtr != 0L) {
-                try { whisperLib.free(oldPtr) } catch (e: Exception) {}
-            }
-            Thread.sleep(200) // 解放待ち
-
-            ctxPtr = try {
-                whisperLib.init(modelPath)
-            } catch (e: Exception) {
-                android.util.Log.e("WhisperVM", "init失敗: ${e.message}", e)
-                0L
-            }
-        }
-
-        if (ctxPtr != 0L) {
-            val sysInfo = withContext(Dispatchers.IO) {
-                try { whisperLib.getSystemInfo() } catch (e: Exception) { "" }
-            }
-            val fileName = File(modelPath).name
-            _modelInfo.value = "✓ $fileName\n$sysInfo"
-            _uiState.value = UiState.ModelLoaded
-            prefs.edit().putString(PREF_MODEL_PATH, modelPath).apply()
-        } else {
-            _modelInfo.value = "モデルの読み込みに失敗しました"
-            _uiState.value = UiState.Error("モデルの読み込みに失敗しました。\nファイルが正しいか確認してください。")
-        }
-    }
-}
-
-
-    /**
-    fun loadModelFromUri(uri: Uri) {
-    viewModelScope.launch {
-        _uiState.value = UiState.LoadingModel
-        _modelInfo.value = "モデルをコピー中..."
-
-        val destFile = File(getApplication<Application>().filesDir, "model.bin")
-
-        val success = withContext(Dispatchers.IO) {
-            try {
-                val inputStream = getApplication<Application>()
-                    .contentResolver.openInputStream(uri)
-                    ?: return@withContext false
-
-                inputStream.use { input ->
-                    FileOutputStream(destFile).use { output ->
-                        val buffer = ByteArray(8 * 1024 * 1024) // 8MB ずつ
-                        var bytes = input.read(buffer)
-                        var total = 0L
-                        while (bytes >= 0) {
-                            output.write(buffer, 0, bytes)
-                            total += bytes
-                            bytes = input.read(buffer)
-                        }
-                        output.flush()
+            withContext(Dispatchers.IO) {
+                val oldPtr = ctxPtr
+                ctxPtr = 0L
+                if (oldPtr != 0L) {
+                    try { whisperLib.free(oldPtr) } catch (e: Exception) {
+                        Log.e(TAG, "free失敗: ${e.message}")
                     }
                 }
-                destFile.exists() && destFile.length() > 0
-            } catch (e: Exception) {
-                android.util.Log.e("WhisperVM", "コピー失敗: ${e.message}", e)
-                false
+                Thread.sleep(200)
+
+                ctxPtr = try {
+                    whisperLib.init(modelPath)
+                } catch (e: Exception) {
+                    Log.e(TAG, "init失敗: ${e.message}", e)
+                    0L
+                }
+            }
+
+            if (ctxPtr != 0L) {
+                val sysInfo = withContext(Dispatchers.IO) {
+                    try { whisperLib.getSystemInfo() } catch (e: Exception) { "" }
+                }
+                val fileName = File(modelPath).name
+                _modelInfo.value = "✓ $fileName\n$sysInfo"
+                _uiState.value = UiState.ModelLoaded
+                prefs.edit().putString(PREF_MODEL_PATH, modelPath).apply()
+                Log.i(TAG, "モデル読み込み成功: $modelPath")
+            } else {
+                _modelInfo.value = "モデルの読み込みに失敗しました"
+                _uiState.value = UiState.Error("モデルの読み込みに失敗しました。\nファイルが正しいか確認してください。")
             }
         }
+    }
 
-        if (success) {
-            loadModel(destFile.absolutePath)
-        } else {
-            _uiState.value = UiState.Error(
-                "モデルファイルのコピーに失敗しました。\n" +
-                "ストレージ空き容量を確認してください。"
-            )
+    fun loadModelFromUri(uri: Uri) {
+        viewModelScope.launch {
+            _uiState.value = UiState.LoadingModel
+            _modelInfo.value = "モデルをコピー中..."
+
+            val destFile = File(getApplication<Application>().filesDir, "model.bin")
+
+            val success = withContext(Dispatchers.IO) {
+                try {
+                    val inputStream = getApplication<Application>()
+                        .contentResolver.openInputStream(uri)
+                        ?: return@withContext false
+                    inputStream.use { input ->
+                        FileOutputStream(destFile).use { output ->
+                            val buffer = ByteArray(8 * 1024 * 1024)
+                            var bytes = input.read(buffer)
+                            while (bytes >= 0) {
+                                output.write(buffer, 0, bytes)
+                                bytes = input.read(buffer)
+                            }
+                            output.flush()
+                        }
+                    }
+                    destFile.exists() && destFile.length() > 0
+                } catch (e: Exception) {
+                    Log.e(TAG, "コピー失敗: ${e.message}", e)
+                    false
+                }
+            }
+
+            if (success) {
+                loadModel(destFile.absolutePath)
+            } else {
+                _uiState.value = UiState.Error("モデルファイルのコピーに失敗しました。\nストレージ空き容量を確認してください。")
+            }
         }
     }
-}
 
-    /**
-     * 録音を開始する
-     */
     fun startRecording() {
         if (ctxPtr == 0L) {
             _uiState.value = UiState.Error("先にモデルを読み込んでください")
             return
         }
-
         audioRecorder.startRecording()
         _uiState.value = UiState.Recording
         _transcriptionText.value = ""
 
-        // 録音時間タイマー
         durationTimerJob = viewModelScope.launch {
             while (audioRecorder.isActive) {
                 _recordingDuration.value = audioRecorder.getRecordingDuration()
@@ -187,30 +165,20 @@ class TranscriptionViewModel(application: Application) : AndroidViewModel(applic
         }
     }
 
-    /**
-     * 録音を停止して文字起こしを実行する
-     */
     fun stopRecordingAndTranscribe() {
         durationTimerJob?.cancel()
-
         val audioData = audioRecorder.stopRecording()
         _recordingDuration.value = audioData.size / 16000f
-
         if (audioData.isEmpty()) {
             _uiState.value = UiState.ModelLoaded
             return
         }
-
         runTranscription(audioData)
     }
 
-    /**
-     * WAV ファイルを文字起こしする
-     */
     fun transcribeFile(uri: Uri) {
         viewModelScope.launch {
             _uiState.value = UiState.Transcribing("ファイルを読み込み中...")
-
             val audioData = try {
                 withContext(Dispatchers.IO) {
                     val tempFile = File(getApplication<Application>().cacheDir, "temp_audio.wav")
@@ -223,14 +191,10 @@ class TranscriptionViewModel(application: Application) : AndroidViewModel(applic
                 _uiState.value = UiState.Error("ファイルの読み込みに失敗しました: ${e.message}")
                 return@launch
             }
-
             runTranscription(audioData)
         }
     }
 
-    /**
-     * 文字起こしを実行する
-     */
     private fun runTranscription(audioData: FloatArray) {
         transcribeJob?.cancel()
         transcribeJob = viewModelScope.launch {
@@ -240,28 +204,27 @@ class TranscriptionViewModel(application: Application) : AndroidViewModel(applic
             val language = _selectedLanguage.value ?: "ja"
             val translate = _translateToEnglish.value ?: false
 
-            Log.i(TAG, "文字起こし開始: ${audioData.size} サンプル, lang=$language")
-
             val result = withContext(Dispatchers.Default) {
-                whisperLib.transcribe(
-                    ctxPtr,
-                    audioData,
-                    language,
-                    translate,
-                    object : WhisperLib.TranscribeCallback {
-                        override fun onNewSegment(text: String) {
-                            viewModelScope.launch(Dispatchers.Main) {
-                                val current = _transcriptionText.value ?: ""
-                                _transcriptionText.value = current + text
+                try {
+                    whisperLib.transcribe(
+                        ctxPtr, audioData, language, translate,
+                        object : WhisperLib.TranscribeCallback {
+                            override fun onNewSegment(text: String) {
+                                viewModelScope.launch(Dispatchers.Main) {
+                                    val current = _transcriptionText.value ?: ""
+                                    _transcriptionText.value = current + text
+                                }
                             }
                         }
-                    }
-                )
+                    )
+                } catch (e: Exception) {
+                    Log.e(TAG, "文字起こし失敗: ${e.message}", e)
+                    "[エラー: ${e.message}]"
+                }
             }
 
             _transcriptionText.value = result
             _uiState.value = UiState.ModelLoaded
-            Log.i(TAG, "文字起こし完了: ${result.length} 文字")
         }
     }
 
@@ -287,7 +250,7 @@ class TranscriptionViewModel(application: Application) : AndroidViewModel(applic
         durationTimerJob?.cancel()
         transcribeJob?.cancel()
         if (ctxPtr != 0L) {
-            whisperLib.free(ctxPtr)
+            try { whisperLib.free(ctxPtr) } catch (e: Exception) {}
         }
         audioRecorder.cancelRecording()
     }
