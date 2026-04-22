@@ -3,13 +3,14 @@ package com.example.whisperapp
 import android.annotation.SuppressLint
 import android.media.AudioFormat
 import android.media.AudioRecord
+import android.media.MediaCodec
+import android.media.MediaExtractor
+import android.media.MediaFormat
 import android.media.MediaRecorder
 import android.util.Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
-import java.io.FileOutputStream
-import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import kotlin.math.min
 
@@ -65,10 +66,8 @@ class AudioRecorder {
         audioRecord?.stop()
         audioRecord?.release()
         audioRecord = null
-
         val samples: List<Short>
         synchronized(recordedSamples) { samples = recordedSamples.toList() }
-
         return FloatArray(samples.size) { i -> samples[i].toFloat() / 32768.0f }
     }
 
@@ -86,68 +85,116 @@ class AudioRecorder {
         }
     }
 
-    suspend fun loadWavFile(file: File): FloatArray = withContext(Dispatchers.IO) {
-        try {
-            val bytes = file.readBytes()
-            if (bytes.size < 44) error("WAVファイルが小さすぎます: ${bytes.size} bytes")
+    /**
+     * MP3 / AAC / M4A / WAV など任意の音声ファイルを
+     * 16kHz モノラル Float32 PCM に変換する
+     */
+    suspend fun loadAudioFile(file: File): FloatArray = withContext(Dispatchers.IO) {
+        Log.i(TAG, "音声ファイル読み込み: ${file.name} (${file.length()} bytes)")
 
-            // RIFF チェック
-            val riff = String(bytes.sliceArray(0..3))
-            if (riff != "RIFF") error("RIFFヘッダーがありません: $riff")
+        val extractor = MediaExtractor()
+        extractor.setDataSource(file.absolutePath)
 
-            val buffer = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
-            buffer.position(22)
-            val channels = buffer.short.toInt().coerceIn(1, 2)
-            val sampleRate = buffer.int.let { if (it <= 0) 16000 else it }
-            buffer.position(34)
-            val bitsPerSample = buffer.short.toInt().let { if (it <= 0) 16 else it }
-
-            // data チャンクを探す
-            var dataOffset = 44
-            buffer.position(36)
-            while (buffer.remaining() >= 8) {
-                val chunkIdBytes = ByteArray(4)
-                buffer.get(chunkIdBytes)
-                val chunkId = String(chunkIdBytes)
-                val chunkSize = buffer.int
-                if (chunkId == "data") {
-                    dataOffset = buffer.position()
-                    break
-                }
-                val skip = minOf(chunkSize, buffer.remaining())
-                buffer.position(buffer.position() + skip)
+        // 音声トラックを探す
+        var audioTrackIndex = -1
+        var format: MediaFormat? = null
+        for (i in 0 until extractor.trackCount) {
+            val trackFormat = extractor.getTrackFormat(i)
+            val mime = trackFormat.getString(MediaFormat.KEY_MIME) ?: continue
+            if (mime.startsWith("audio/")) {
+                audioTrackIndex = i
+                format = trackFormat
+                break
             }
+        }
 
-            Log.i(TAG, "WAV: ${sampleRate}Hz, ${channels}ch, ${bitsPerSample}bit, dataOffset=$dataOffset")
+        if (audioTrackIndex < 0 || format == null) {
+            extractor.release()
+            error("音声トラックが見つかりません")
+        }
 
-            buffer.position(dataOffset)
-            val bytesPerSample = maxOf(bitsPerSample / 8, 1)
-            val rawSamples = mutableListOf<Float>()
+        extractor.selectTrack(audioTrackIndex)
 
-            while (buffer.remaining() >= bytesPerSample * channels) {
-                val left = when (bitsPerSample) {
-                    32 -> buffer.int.toFloat() / 2147483648.0f
-                    else -> buffer.short.toFloat() / 32768.0f
-                }
-                val right = if (channels == 2) {
-                    when (bitsPerSample) {
-                        32 -> buffer.int.toFloat() / 2147483648.0f
-                        else -> buffer.short.toFloat() / 32768.0f
+        val mime = format.getString(MediaFormat.KEY_MIME)!!
+        val srcSampleRate = format.getInteger(MediaFormat.KEY_SAMPLE_RATE)
+        val srcChannels = format.getInteger(MediaFormat.KEY_CHANNEL_COUNT)
+
+        Log.i(TAG, "フォーマット: $mime, ${srcSampleRate}Hz, ${srcChannels}ch")
+
+        val codec = MediaCodec.createDecoderByType(mime)
+        codec.configure(format, null, null, 0)
+        codec.start()
+
+        val pcmSamples = mutableListOf<Short>()
+        val timeoutUs = 10000L
+        var inputDone = false
+        var outputDone = false
+
+        while (!outputDone) {
+            if (!inputDone) {
+                val inputIndex = codec.dequeueInputBuffer(timeoutUs)
+                if (inputIndex >= 0) {
+                    val inputBuffer = codec.getInputBuffer(inputIndex)!!
+                    val sampleSize = extractor.readSampleData(inputBuffer, 0)
+                    if (sampleSize < 0) {
+                        codec.queueInputBuffer(
+                            inputIndex, 0, 0, 0,
+                            MediaCodec.BUFFER_FLAG_END_OF_STREAM
+                        )
+                        inputDone = true
+                    } else {
+                        codec.queueInputBuffer(
+                            inputIndex, 0, sampleSize,
+                            extractor.sampleTime, 0
+                        )
+                        extractor.advance()
                     }
-                } else left
-                rawSamples.add((left + right) / if (channels == 2) 2f else 1f)
+                }
             }
 
-            Log.i(TAG, "サンプル数: ${rawSamples.size}")
+            val bufferInfo = MediaCodec.BufferInfo()
+            val outputIndex = codec.dequeueOutputBuffer(bufferInfo, timeoutUs)
+            if (outputIndex >= 0) {
+                val outputBuffer = codec.getOutputBuffer(outputIndex)!!
+                outputBuffer.order(ByteOrder.LITTLE_ENDIAN)
+                val shortBuffer = outputBuffer.asShortBuffer()
+                while (shortBuffer.hasRemaining()) {
+                    pcmSamples.add(shortBuffer.get())
+                }
+                codec.releaseOutputBuffer(outputIndex, false)
+                if (bufferInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) {
+                    outputDone = true
+                }
+            }
+        }
 
-            if (sampleRate == SAMPLE_RATE) rawSamples.toFloatArray()
-            else resample(rawSamples.toFloatArray(), sampleRate, SAMPLE_RATE)
+        codec.stop()
+        codec.release()
+        extractor.release()
 
-        } catch (e: Exception) {
-            Log.e(TAG, "WAV読み込みエラー: ${e.message}", e)
-            throw e
+        Log.i(TAG, "デコード完了: ${pcmSamples.size} サンプル")
+
+        // ステレオ → モノラル変換
+        val monoSamples = if (srcChannels == 2) {
+            FloatArray(pcmSamples.size / 2) { i ->
+                val left = pcmSamples.getOrElse(i * 2) { 0 }.toFloat() / 32768.0f
+                val right = pcmSamples.getOrElse(i * 2 + 1) { 0 }.toFloat() / 32768.0f
+                (left + right) / 2f
+            }
+        } else {
+            FloatArray(pcmSamples.size) { i -> pcmSamples[i].toFloat() / 32768.0f }
+        }
+
+        // リサンプリング
+        if (srcSampleRate == SAMPLE_RATE) monoSamples
+        else {
+            Log.i(TAG, "リサンプリング: ${srcSampleRate}Hz → ${SAMPLE_RATE}Hz")
+            resample(monoSamples, srcSampleRate, SAMPLE_RATE)
         }
     }
+
+    // 後方互換
+    suspend fun loadWavFile(file: File): FloatArray = loadAudioFile(file)
 
     private fun resample(input: FloatArray, fromRate: Int, toRate: Int): FloatArray {
         val ratio = fromRate.toDouble() / toRate
