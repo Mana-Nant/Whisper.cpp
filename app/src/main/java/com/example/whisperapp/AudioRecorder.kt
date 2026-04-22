@@ -119,40 +119,64 @@ class AudioRecorder {
     /**
      * WAV ファイルからデータを読み込む (16kHz へリサンプリング)
      */
-    suspend fun loadWavFile(file: File): FloatArray = withContext(Dispatchers.IO) {
-        val bytes = file.readBytes()
-        val buffer = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
+suspend fun loadWavFile(file: File): FloatArray = withContext(Dispatchers.IO) {
+   try {
+       val bytes = file.readBytes()
+       if (bytes.size < 44) error("WAVファイルが小さすぎます")
 
-        // WAV ヘッダー解析
-        buffer.position(22)
-        val channels = buffer.short.toInt()
-        val sampleRate = buffer.int
-        buffer.position(34)
-        val bitsPerSample = buffer.short.toInt()
-        buffer.position(44) // データチャンク開始
+       val buffer = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
 
-        Log.i(TAG, "WAV: ${sampleRate}Hz, ${channels}ch, ${bitsPerSample}bit")
+       // RIFF チェック
+       val riff = String(bytes.sliceArray(0..3))
+       if (riff != "RIFF") error("RIFFヘッダーがありません")
 
-        val rawSamples = mutableListOf<Float>()
+       buffer.position(22)
+       val channels = buffer.short.toInt().coerceIn(1, 2)
+       val sampleRate = buffer.int.let { if (it <= 0) 16000 else it }
+       buffer.position(34)
+       val bitsPerSample = buffer.short.toInt().let { if (it <= 0) 16 else it }
 
-        // PCM データ読み取り
-        while (buffer.remaining() >= 2) {
-            if (channels == 2) {
-                val left = buffer.short.toFloat() / 32768.0f
-                val right = if (buffer.remaining() >= 2) buffer.short.toFloat() / 32768.0f else 0f
-                rawSamples.add((left + right) / 2f) // ステレオ -> モノラル
-            } else {
-                rawSamples.add(buffer.short.toFloat() / 32768.0f)
-            }
-        }
+       // data チャンクを探す
+       var dataOffset = 36
+       buffer.position(36)
+       while (buffer.remaining() >= 8) {
+           val chunkId = String(ByteArray(4).also { buffer.get(it) })
+           val chunkSize = buffer.int
+           if (chunkId == "data") { dataOffset = buffer.position(); break }
+           buffer.position(buffer.position() + chunkSize)
+       }
 
-        // リサンプリング (必要な場合)
-        if (sampleRate == SAMPLE_RATE) {
-            rawSamples.toFloatArray()
-        } else {
-            resample(rawSamples.toFloatArray(), sampleRate, SAMPLE_RATE)
-        }
-    }
+       Log.i(TAG, "WAV: ${sampleRate}Hz, ${channels}ch, ${bitsPerSample}bit, offset=$dataOffset")
+
+       buffer.position(dataOffset)
+       val rawSamples = mutableListOf<Float>()
+       val bytesPerSample = bitsPerSample / 8
+
+       while (buffer.remaining() >= bytesPerSample * channels) {
+           val left = when (bitsPerSample) {
+               16 -> buffer.short.toFloat() / 32768.0f
+               32 -> buffer.int.toFloat() / 2147483648.0f
+               else -> buffer.short.toFloat() / 32768.0f
+           }
+           val right = if (channels == 2) {
+               when (bitsPerSample) {
+                   16 -> buffer.short.toFloat() / 32768.0f
+                   32 -> buffer.int.toFloat() / 2147483648.0f
+                   else -> buffer.short.toFloat() / 32768.0f
+               }
+           } else left
+
+           rawSamples.add((left + right) / if (channels == 2) 2f else 1f)
+       }
+
+       if (sampleRate == SAMPLE_RATE) rawSamples.toFloatArray()
+       else resample(rawSamples.toFloatArray(), sampleRate, SAMPLE_RATE)
+
+   } catch (e: Exception) {
+       Log.e(TAG, "WAV読み込みエラー: ${e.message}", e)
+       throw e
+   }
+}
 
     /**
      * 線形補間リサンプリング
