@@ -78,64 +78,92 @@ class TranscriptionViewModel(application: Application) : AndroidViewModel(applic
     /**
      * モデルを読み込む
      */
-    fun loadModel(modelPath: String) {
-        viewModelScope.launch {
-            _uiState.value = UiState.LoadingModel
-            _modelInfo.value = "モデル読み込み中..."
+ fun loadModel(modelPath: String) {
+    viewModelScope.launch {
+        _uiState.value = UiState.LoadingModel
+        _modelInfo.value = "モデル読み込み中..."
 
-            withContext(Dispatchers.IO) {
-                // 既存コンテキストを解放
-                if (ctxPtr != 0L) {
-                    whisperLib.free(ctxPtr)
-                    ctxPtr = 0L
-                }
+        // 録音中なら停止
+        audioRecorder.cancelRecording()
+        transcribeJob?.cancel()
 
-                ctxPtr = whisperLib.init(modelPath)
+        withContext(Dispatchers.IO) {
+            // 既存コンテキストを先に解放
+            val oldPtr = ctxPtr
+            ctxPtr = 0L
+            if (oldPtr != 0L) {
+                try { whisperLib.free(oldPtr) } catch (e: Exception) {}
             }
+            Thread.sleep(200) // 解放待ち
 
-            if (ctxPtr != 0L) {
-                val sysInfo = withContext(Dispatchers.IO) {
-                    whisperLib.getSystemInfo()
-                }
-                val fileName = File(modelPath).name
-                _modelInfo.value = "✓ $fileName\n$sysInfo"
-                _uiState.value = UiState.ModelLoaded
-
-                // モデルパスを保存
-                prefs.edit().putString(PREF_MODEL_PATH, modelPath).apply()
-                Log.i(TAG, "モデル読み込み成功: $modelPath")
-            } else {
-                _modelInfo.value = "モデルの読み込みに失敗しました"
-                _uiState.value = UiState.Error("モデルの読み込みに失敗しました。\nファイルが正しいか確認してください。")
+            ctxPtr = try {
+                whisperLib.init(modelPath)
+            } catch (e: Exception) {
+                android.util.Log.e("WhisperVM", "init失敗: ${e.message}", e)
+                0L
             }
         }
+
+        if (ctxPtr != 0L) {
+            val sysInfo = withContext(Dispatchers.IO) {
+                try { whisperLib.getSystemInfo() } catch (e: Exception) { "" }
+            }
+            val fileName = File(modelPath).name
+            _modelInfo.value = "✓ $fileName\n$sysInfo"
+            _uiState.value = UiState.ModelLoaded
+            prefs.edit().putString(PREF_MODEL_PATH, modelPath).apply()
+        } else {
+            _modelInfo.value = "モデルの読み込みに失敗しました"
+            _uiState.value = UiState.Error("モデルの読み込みに失敗しました。\nファイルが正しいか確認してください。")
+        }
     }
+}
+
 
     /**
-     * Uri からモデルをアプリ内にコピーして読み込む
-     */
     fun loadModelFromUri(uri: Uri) {
-        viewModelScope.launch {
-            _uiState.value = UiState.LoadingModel
-            _modelInfo.value = "モデルをコピー中..."
+    viewModelScope.launch {
+        _uiState.value = UiState.LoadingModel
+        _modelInfo.value = "モデルをコピー中..."
 
-            val destFile = File(getApplication<Application>().filesDir, "model.bin")
+        val destFile = File(getApplication<Application>().filesDir, "model.bin")
 
-            withContext(Dispatchers.IO) {
-                getApplication<Application>().contentResolver.openInputStream(uri)?.use { input ->
+        val success = withContext(Dispatchers.IO) {
+            try {
+                val inputStream = getApplication<Application>()
+                    .contentResolver.openInputStream(uri)
+                    ?: return@withContext false
+
+                inputStream.use { input ->
                     FileOutputStream(destFile).use { output ->
-                        input.copyTo(output)
+                        val buffer = ByteArray(8 * 1024 * 1024) // 8MB ずつ
+                        var bytes = input.read(buffer)
+                        var total = 0L
+                        while (bytes >= 0) {
+                            output.write(buffer, 0, bytes)
+                            total += bytes
+                            bytes = input.read(buffer)
+                        }
+                        output.flush()
                     }
                 }
-            }
-
-            if (destFile.exists() && destFile.length() > 0) {
-                loadModel(destFile.absolutePath)
-            } else {
-                _uiState.value = UiState.Error("モデルファイルのコピーに失敗しました")
+                destFile.exists() && destFile.length() > 0
+            } catch (e: Exception) {
+                android.util.Log.e("WhisperVM", "コピー失敗: ${e.message}", e)
+                false
             }
         }
+
+        if (success) {
+            loadModel(destFile.absolutePath)
+        } else {
+            _uiState.value = UiState.Error(
+                "モデルファイルのコピーに失敗しました。\n" +
+                "ストレージ空き容量を確認してください。"
+            )
+        }
     }
+}
 
     /**
      * 録音を開始する
