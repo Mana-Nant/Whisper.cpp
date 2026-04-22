@@ -1,12 +1,14 @@
 package com.example.whisperapp
 
 import android.annotation.SuppressLint
+import android.content.Context
 import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaCodec
 import android.media.MediaExtractor
 import android.media.MediaFormat
 import android.media.MediaRecorder
+import android.net.Uri
 import android.util.Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -18,7 +20,7 @@ class AudioRecorder {
 
     companion object {
         private const val TAG = "AudioRecorder"
-        private const val SAMPLE_RATE = 16000
+        const val SAMPLE_RATE = 16000
         private const val CHANNEL_CONFIG = AudioFormat.CHANNEL_IN_MONO
         private const val AUDIO_FORMAT = AudioFormat.ENCODING_PCM_16BIT
     }
@@ -40,7 +42,7 @@ class AudioRecorder {
         )
 
         if (audioRecord?.state != AudioRecord.STATE_INITIALIZED) {
-            Log.e(TAG, "AudioRecord の初期化に失敗しました")
+            Log.e(TAG, "AudioRecord 初期化失敗")
             return
         }
 
@@ -68,13 +70,14 @@ class AudioRecorder {
         audioRecord = null
         val samples: List<Short>
         synchronized(recordedSamples) { samples = recordedSamples.toList() }
+        recordedSamples.clear()
         return FloatArray(samples.size) { i -> samples[i].toFloat() / 32768.0f }
     }
 
     fun cancelRecording() {
         isRecording = false
-        audioRecord?.stop()
-        audioRecord?.release()
+        try { audioRecord?.stop() } catch (e: Exception) {}
+        try { audioRecord?.release() } catch (e: Exception) {}
         audioRecord = null
         recordedSamples.clear()
     }
@@ -86,15 +89,33 @@ class AudioRecorder {
     }
 
     /**
-     * MP3 / AAC / M4A / WAV など任意の音声ファイルを
-     * 16kHz モノラル Float32 PCM に変換する
+     * URI から直接音声を読み込む (MP3/AAC/M4A/WAV/OGG 対応)
+     * ファイルコピーなしで直接デコード
      */
+    suspend fun loadAudioFromUri(context: Context, uri: Uri): FloatArray =
+        withContext(Dispatchers.IO) {
+            Log.i(TAG, "URI から音声読み込み: $uri")
+            val extractor = MediaExtractor()
+            try {
+                extractor.setDataSource(context, uri, null)
+                decodeWithExtractor(extractor)
+            } finally {
+                extractor.release()
+            }
+        }
+
     suspend fun loadAudioFile(file: File): FloatArray = withContext(Dispatchers.IO) {
-        Log.i(TAG, "音声ファイル読み込み: ${file.name} (${file.length()} bytes)")
-
+        Log.i(TAG, "ファイルから音声読み込み: ${file.name}")
         val extractor = MediaExtractor()
-        extractor.setDataSource(file.absolutePath)
+        try {
+            extractor.setDataSource(file.absolutePath)
+            decodeWithExtractor(extractor)
+        } finally {
+            extractor.release()
+        }
+    }
 
+    private fun decodeWithExtractor(extractor: MediaExtractor): FloatArray {
         // 音声トラックを探す
         var audioTrackIndex = -1
         var format: MediaFormat? = null
@@ -109,15 +130,18 @@ class AudioRecorder {
         }
 
         if (audioTrackIndex < 0 || format == null) {
-            extractor.release()
             error("音声トラックが見つかりません")
         }
 
         extractor.selectTrack(audioTrackIndex)
 
         val mime = format.getString(MediaFormat.KEY_MIME)!!
-        val srcSampleRate = format.getInteger(MediaFormat.KEY_SAMPLE_RATE)
-        val srcChannels = format.getInteger(MediaFormat.KEY_CHANNEL_COUNT)
+        val srcSampleRate = try {
+            format.getInteger(MediaFormat.KEY_SAMPLE_RATE)
+        } catch (e: Exception) { 44100 }
+        val srcChannels = try {
+            format.getInteger(MediaFormat.KEY_CHANNEL_COUNT)
+        } catch (e: Exception) { 1 }
 
         Log.i(TAG, "フォーマット: $mime, ${srcSampleRate}Hz, ${srcChannels}ch")
 
@@ -125,69 +149,73 @@ class AudioRecorder {
         codec.configure(format, null, null, 0)
         codec.start()
 
-        val pcmSamples = mutableListOf<Short>()
+        val outputSamples = ArrayList<Float>()
         val timeoutUs = 10000L
         var inputDone = false
         var outputDone = false
 
-        while (!outputDone) {
-            if (!inputDone) {
-                val inputIndex = codec.dequeueInputBuffer(timeoutUs)
-                if (inputIndex >= 0) {
-                    val inputBuffer = codec.getInputBuffer(inputIndex)!!
-                    val sampleSize = extractor.readSampleData(inputBuffer, 0)
-                    if (sampleSize < 0) {
-                        codec.queueInputBuffer(
-                            inputIndex, 0, 0, 0,
-                            MediaCodec.BUFFER_FLAG_END_OF_STREAM
-                        )
-                        inputDone = true
-                    } else {
-                        codec.queueInputBuffer(
-                            inputIndex, 0, sampleSize,
-                            extractor.sampleTime, 0
-                        )
-                        extractor.advance()
+        try {
+            while (!outputDone) {
+                if (!inputDone) {
+                    val inputIndex = codec.dequeueInputBuffer(timeoutUs)
+                    if (inputIndex >= 0) {
+                        val inputBuffer = codec.getInputBuffer(inputIndex)!!
+                        val sampleSize = extractor.readSampleData(inputBuffer, 0)
+                        if (sampleSize < 0) {
+                            codec.queueInputBuffer(
+                                inputIndex, 0, 0, 0,
+                                MediaCodec.BUFFER_FLAG_END_OF_STREAM
+                            )
+                            inputDone = true
+                        } else {
+                            codec.queueInputBuffer(
+                                inputIndex, 0, sampleSize,
+                                extractor.sampleTime, 0
+                            )
+                            extractor.advance()
+                        }
+                    }
+                }
+
+                val bufferInfo = MediaCodec.BufferInfo()
+                val outputIndex = codec.dequeueOutputBuffer(bufferInfo, timeoutUs)
+                if (outputIndex >= 0) {
+                    val outputBuffer = codec.getOutputBuffer(outputIndex)!!
+                    outputBuffer.order(ByteOrder.LITTLE_ENDIAN)
+                    val shortBuffer = outputBuffer.asShortBuffer()
+                    while (shortBuffer.hasRemaining()) {
+                        outputSamples.add(shortBuffer.get().toFloat() / 32768.0f)
+                    }
+                    codec.releaseOutputBuffer(outputIndex, false)
+                    if (bufferInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) {
+                        outputDone = true
                     }
                 }
             }
-
-            val bufferInfo = MediaCodec.BufferInfo()
-            val outputIndex = codec.dequeueOutputBuffer(bufferInfo, timeoutUs)
-            if (outputIndex >= 0) {
-                val outputBuffer = codec.getOutputBuffer(outputIndex)!!
-                outputBuffer.order(ByteOrder.LITTLE_ENDIAN)
-                val shortBuffer = outputBuffer.asShortBuffer()
-                while (shortBuffer.hasRemaining()) {
-                    pcmSamples.add(shortBuffer.get())
-                }
-                codec.releaseOutputBuffer(outputIndex, false)
-                if (bufferInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) {
-                    outputDone = true
-                }
-            }
+        } finally {
+            try { codec.stop() } catch (e: Exception) {}
+            try { codec.release() } catch (e: Exception) {}
         }
 
-        codec.stop()
-        codec.release()
-        extractor.release()
-
-        Log.i(TAG, "デコード完了: ${pcmSamples.size} サンプル")
+        Log.i(TAG, "デコード完了: ${outputSamples.size} サンプル (${srcChannels}ch)")
 
         // ステレオ → モノラル変換
-        val monoSamples = if (srcChannels == 2) {
-            FloatArray(pcmSamples.size / 2) { i ->
-                val left = pcmSamples.getOrElse(i * 2) { 0 }.toFloat() / 32768.0f
-                val right = pcmSamples.getOrElse(i * 2 + 1) { 0 }.toFloat() / 32768.0f
-                (left + right) / 2f
+        val monoSamples = if (srcChannels >= 2) {
+            FloatArray(outputSamples.size / srcChannels) { i ->
+                var sum = 0f
+                for (ch in 0 until srcChannels) {
+                    sum += outputSamples.getOrElse(i * srcChannels + ch) { 0f }
+                }
+                sum / srcChannels
             }
         } else {
-            FloatArray(pcmSamples.size) { i -> pcmSamples[i].toFloat() / 32768.0f }
+            outputSamples.toFloatArray()
         }
 
         // リサンプリング
-        if (srcSampleRate == SAMPLE_RATE) monoSamples
-        else {
+        return if (srcSampleRate == SAMPLE_RATE) {
+            monoSamples
+        } else {
             Log.i(TAG, "リサンプリング: ${srcSampleRate}Hz → ${SAMPLE_RATE}Hz")
             resample(monoSamples, srcSampleRate, SAMPLE_RATE)
         }
